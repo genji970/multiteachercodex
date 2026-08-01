@@ -185,3 +185,6 @@ MTC_BROWSER_EXECUTABLE=/absolute/path/to/browser
 - External API charges are separate from a ChatGPT subscription.
 - The extension depends on the current ChatGPT web interface and may need selector updates after major UI changes.
 - The dedicated browser profile avoids silently modifying the user's normal Edge or Chrome profile.
+
+## Citation
+This independent project is for engineering side project. And chatgpt is used.
