@@ -4,6 +4,9 @@
     const DEFAULT_SERVER_URL = "http://127.0.0.1:8787";
     const STABLE_MS = 1600;
     const RECONCILE_DELAY_MS = 180;
+    const DRAFT_TIMEOUT_MS = 90_000;
+    const REVIEW_TIMEOUT_MS = 130_000;
+    const FINAL_TIMEOUT_MS = 120_000;
     let settings = {
         enabled: true,
         serverUrl: DEFAULT_SERVER_URL,
@@ -16,6 +19,7 @@
     let lastDraftText = "";
     let lastDraftChangeAt = 0;
     let reconcileTimer;
+    let cycleTimeout;
     let operationToken = 0;
     const processedUserNodes = new WeakSet();
     function messageText(node) {
@@ -108,7 +112,26 @@
             }
         }
     }
+    function clearCycleTimeout() {
+        if (cycleTimeout !== undefined) {
+            window.clearTimeout(cycleTimeout);
+            cycleTimeout = undefined;
+        }
+    }
+    function failCycle(message) {
+        operationToken += 1;
+        showTurn(activeDraftNode);
+        setStatus(`MultiTeacherCodex failed: ${message}`, "error");
+        sendBrowserEvent("extension_error", { message });
+        clearStatus(7000);
+        resetCycle();
+    }
+    function armCycleTimeout(message, delayMs) {
+        clearCycleTimeout();
+        cycleTimeout = window.setTimeout(() => failCycle(message), delayMs);
+    }
     function resetCycle() {
+        clearCycleTimeout();
         phase = "idle";
         activeUserNode = null;
         activeDraftNode = null;
@@ -131,6 +154,20 @@
     }
     function callReviewServer(originalQuestion, chatgptAnswer) {
         return new Promise((resolve) => {
+            let settled = false;
+            const finish = (response) => {
+                if (settled)
+                    return;
+                settled = true;
+                window.clearTimeout(timeout);
+                resolve(response);
+            };
+            const timeout = window.setTimeout(() => {
+                finish({
+                    ok: false,
+                    error: "The external review request timed out.",
+                });
+            }, REVIEW_TIMEOUT_MS);
             chrome.runtime.sendMessage({
                 type: "multiteachercodex:review",
                 serverUrl: settings.serverUrl,
@@ -138,13 +175,13 @@
                 chatgptAnswer,
             }, (response) => {
                 if (chrome.runtime.lastError) {
-                    resolve({
+                    finish({
                         ok: false,
                         error: chrome.runtime.lastError.message ?? "Extension runtime error.",
                     });
                     return;
                 }
-                resolve(response ?? {
+                finish(response ?? {
                     ok: false,
                     error: "No response from extension background.",
                 });
@@ -201,6 +238,7 @@
     }
     async function reviewAndRevise(question, draft, token) {
         phase = "reviewing";
+        armCycleTimeout("External review did not finish in time.", REVIEW_TIMEOUT_MS);
         setStatus("MultiTeacherCodex: external model reviewing…");
         const response = await callReviewServer(question, draft);
         if (token !== operationToken)
@@ -212,14 +250,11 @@
         }
         if (!response.ok || typeof instruction !== "string" || !instruction.trim()) {
             const errorMessage = response.error ?? "invalid review response";
-            showTurn(activeDraftNode);
-            setStatus(`MultiTeacherCodex failed: ${errorMessage}`, "error");
-            sendBrowserEvent("extension_error", { message: errorMessage });
-            clearStatus(7000);
-            resetCycle();
+            failCycle(errorMessage);
             return;
         }
         phase = "sending-revision";
+        armCycleTimeout("The hidden revision prompt could not be submitted in time.", 20_000);
         setStatus("MultiTeacherCodex: asking ChatGPT to revise…");
         try {
             await sendInternalRevision(instruction);
@@ -227,14 +262,11 @@
                 return;
             sendBrowserEvent("revision_submitted", { content: instruction });
             phase = "awaiting-final";
+            armCycleTimeout("The revised ChatGPT answer did not finish in time.", FINAL_TIMEOUT_MS);
         }
         catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error);
-            showTurn(activeDraftNode);
-            setStatus(`MultiTeacherCodex failed: ${errorMessage}`, "error");
-            sendBrowserEvent("extension_error", { message: errorMessage });
-            clearStatus(7000);
-            resetCycle();
+            failCycle(errorMessage);
         }
     }
     function reconcile() {
@@ -264,6 +296,7 @@
             lastDraftText = "";
             lastDraftChangeAt = Date.now();
             hideTurn(nextAssistant);
+            armCycleTimeout("ChatGPT draft capture timed out. The original draft has been restored.", DRAFT_TIMEOUT_MS);
             setStatus("MultiTeacherCodex: waiting for ChatGPT draft…");
         }
         if (phase === "awaiting-draft" && activeUserNode) {
@@ -344,9 +377,15 @@
         await loadSettings();
         const existingTurns = getTurns();
         hidePersistedInternalTurns(existingTurns);
+        const latestRecoverableUser = [...existingTurns]
+            .reverse()
+            .find((turn) => turn.role === "user" &&
+            !turn.text.startsWith(INTERNAL_MARKER) &&
+            Boolean(findNextTurn(existingTurns, turn.node, "assistant")));
         for (const turn of existingTurns) {
             if (turn.role === "user" &&
-                !turn.text.startsWith(INTERNAL_MARKER)) {
+                !turn.text.startsWith(INTERNAL_MARKER) &&
+                turn.node !== latestRecoverableUser?.node) {
                 processedUserNodes.add(turn.node);
             }
         }
@@ -355,6 +394,12 @@
             subtree: true,
             characterData: true,
         });
+        sendBrowserEvent("extension_ready", {
+            message: `enabled=${settings.enabled}; page=${location.href}`,
+        });
+        setStatus("MultiTeacherCodex: extension connected", "done");
+        clearStatus(1400);
+        scheduleReconcile(50);
     }
     void initialize();
 })();

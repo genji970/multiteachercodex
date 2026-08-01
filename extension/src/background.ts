@@ -13,7 +13,7 @@ type HealthMessage = {
 type EventMessage = {
   type: "multiteachercodex:event";
   serverUrl: string;
-  event: "revision_submitted" | "final_answer" | "extension_error";
+  event: "extension_ready" | "revision_submitted" | "final_answer" | "extension_error";
   reviewId?: string;
   content?: string;
   message?: string;

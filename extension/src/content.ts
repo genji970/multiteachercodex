@@ -3,6 +3,9 @@
   const DEFAULT_SERVER_URL = "http://127.0.0.1:8787";
   const STABLE_MS = 1600;
   const RECONCILE_DELAY_MS = 180;
+  const DRAFT_TIMEOUT_MS = 90_000;
+  const REVIEW_TIMEOUT_MS = 130_000;
+  const FINAL_TIMEOUT_MS = 120_000;
 
   type Phase =
     | "idle"
@@ -28,6 +31,7 @@
   };
 
   type BrowserEvent =
+    | "extension_ready"
     | "revision_submitted"
     | "final_answer"
     | "extension_error";
@@ -51,6 +55,7 @@
   let lastDraftText = "";
   let lastDraftChangeAt = 0;
   let reconcileTimer: number | undefined;
+  let cycleTimeout: number | undefined;
   let operationToken = 0;
   const processedUserNodes = new WeakSet<HTMLElement>();
 
@@ -175,7 +180,29 @@
     }
   }
 
+  function clearCycleTimeout(): void {
+    if (cycleTimeout !== undefined) {
+      window.clearTimeout(cycleTimeout);
+      cycleTimeout = undefined;
+    }
+  }
+
+  function failCycle(message: string): void {
+    operationToken += 1;
+    showTurn(activeDraftNode);
+    setStatus(`MultiTeacherCodex failed: ${message}`, "error");
+    sendBrowserEvent("extension_error", { message });
+    clearStatus(7000);
+    resetCycle();
+  }
+
+  function armCycleTimeout(message: string, delayMs: number): void {
+    clearCycleTimeout();
+    cycleTimeout = window.setTimeout(() => failCycle(message), delayMs);
+  }
+
   function resetCycle(): void {
+    clearCycleTimeout();
     phase = "idle";
     activeUserNode = null;
     activeDraftNode = null;
@@ -204,6 +231,20 @@
     chatgptAnswer: string,
   ): Promise<ReviewResponse> {
     return new Promise((resolve) => {
+      let settled = false;
+      const finish = (response: ReviewResponse): void => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timeout);
+        resolve(response);
+      };
+      const timeout = window.setTimeout(() => {
+        finish({
+          ok: false,
+          error: "The external review request timed out.",
+        });
+      }, REVIEW_TIMEOUT_MS);
+
       chrome.runtime.sendMessage(
         {
           type: "multiteachercodex:review",
@@ -213,14 +254,14 @@
         },
         (response: ReviewResponse | undefined) => {
           if (chrome.runtime.lastError) {
-            resolve({
+            finish({
               ok: false,
               error:
                 chrome.runtime.lastError.message ?? "Extension runtime error.",
             });
             return;
           }
-          resolve(
+          finish(
             response ?? {
               ok: false,
               error: "No response from extension background.",
@@ -304,6 +345,7 @@
     token: number,
   ): Promise<void> {
     phase = "reviewing";
+    armCycleTimeout("External review did not finish in time.", REVIEW_TIMEOUT_MS);
     setStatus("MultiTeacherCodex: external model reviewing…");
 
     const response = await callReviewServer(question, draft);
@@ -317,15 +359,12 @@
 
     if (!response.ok || typeof instruction !== "string" || !instruction.trim()) {
       const errorMessage = response.error ?? "invalid review response";
-      showTurn(activeDraftNode);
-      setStatus(`MultiTeacherCodex failed: ${errorMessage}`, "error");
-      sendBrowserEvent("extension_error", { message: errorMessage });
-      clearStatus(7000);
-      resetCycle();
+      failCycle(errorMessage);
       return;
     }
 
     phase = "sending-revision";
+    armCycleTimeout("The hidden revision prompt could not be submitted in time.", 20_000);
     setStatus("MultiTeacherCodex: asking ChatGPT to revise…");
 
     try {
@@ -333,13 +372,10 @@
       if (token !== operationToken) return;
       sendBrowserEvent("revision_submitted", { content: instruction });
       phase = "awaiting-final";
+      armCycleTimeout("The revised ChatGPT answer did not finish in time.", FINAL_TIMEOUT_MS);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      showTurn(activeDraftNode);
-      setStatus(`MultiTeacherCodex failed: ${errorMessage}`, "error");
-      sendBrowserEvent("extension_error", { message: errorMessage });
-      clearStatus(7000);
-      resetCycle();
+      failCycle(errorMessage);
     }
   }
 
@@ -375,6 +411,7 @@
       lastDraftText = "";
       lastDraftChangeAt = Date.now();
       hideTurn(nextAssistant);
+      armCycleTimeout("ChatGPT draft capture timed out. The original draft has been restored.", DRAFT_TIMEOUT_MS);
       setStatus("MultiTeacherCodex: waiting for ChatGPT draft…");
     }
 
@@ -469,19 +506,38 @@
     await loadSettings();
     const existingTurns = getTurns();
     hidePersistedInternalTurns(existingTurns);
+
+    const latestRecoverableUser = [...existingTurns]
+      .reverse()
+      .find(
+        (turn) =>
+          turn.role === "user" &&
+          !turn.text.startsWith(INTERNAL_MARKER) &&
+          Boolean(findNextTurn(existingTurns, turn.node, "assistant")),
+      );
+
     for (const turn of existingTurns) {
       if (
         turn.role === "user" &&
-        !turn.text.startsWith(INTERNAL_MARKER)
+        !turn.text.startsWith(INTERNAL_MARKER) &&
+        turn.node !== latestRecoverableUser?.node
       ) {
         processedUserNodes.add(turn.node);
       }
     }
+
     observer.observe(document.documentElement, {
       childList: true,
       subtree: true,
       characterData: true,
     });
+
+    sendBrowserEvent("extension_ready", {
+      message: `enabled=${settings.enabled}; page=${location.href}`,
+    });
+    setStatus("MultiTeacherCodex: extension connected", "done");
+    clearStatus(1400);
+    scheduleReconcile(50);
   }
 
   void initialize();

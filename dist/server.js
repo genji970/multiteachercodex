@@ -148,7 +148,7 @@ function parseBrowserEvent(value) {
     }
     const input = value;
     const event = typeof input.event === "string" ? input.event : "";
-    if (!new Set(["revision_submitted", "final_answer", "extension_error"]).has(event)) {
+    if (!new Set(["extension_ready", "revision_submitted", "final_answer", "extension_error"]).has(event)) {
         throw new Error("Unsupported browser event.");
     }
     return {
@@ -161,6 +161,11 @@ function parseBrowserEvent(value) {
     };
 }
 function logBrowserEvent(event) {
+    if (event.event === "extension_ready") {
+        logHeader("BROWSER EXTENSION READY");
+        logSection("STATUS", event.message || event.content || "The extension is connected to the local server.");
+        return;
+    }
     if (event.event === "revision_submitted") {
         logHeader("BROWSER CONFIRMED: REVISION INSTRUCTION SUBMITTED TO CHATGPT", event.review_id);
         logSection("DELIVERED REVISION INSTRUCTION", event.content || "The extension confirmed submission, but no instruction text was supplied.");

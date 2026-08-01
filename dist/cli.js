@@ -8,6 +8,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { stdin, stdout } from "node:process";
 import { createInterface } from "node:readline/promises";
+import { Writable } from "node:stream";
 setDefaultResultOrder("ipv4first");
 const APP_NAME = "multiteachercodex";
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -189,65 +190,68 @@ function ensureRuntimeDependencies() {
         throw new Error("Runtime dependency installation failed. Check npm registry/network access and run npx -y . again.");
     }
 }
+function normalizeSecret(value) {
+    let normalized = value.trim();
+    if ((normalized.startsWith('"') && normalized.endsWith('"')) ||
+        (normalized.startsWith("'") && normalized.endsWith("'"))) {
+        normalized = normalized.slice(1, -1).trim();
+    }
+    if (normalized.length < 20) {
+        throw new Error("The API key is too short. Paste the complete key.");
+    }
+    if (/[^\x21-\x7E]/u.test(normalized)) {
+        throw new Error("The API key contains whitespace, a line break, or a non-ASCII character. Copy only the key value.");
+    }
+    return normalized;
+}
+function isUsableSecret(value) {
+    if (!value)
+        return false;
+    try {
+        normalizeSecret(value);
+        return true;
+    }
+    catch {
+        return false;
+    }
+}
 function hasConfiguredReviewer() {
     const env = process.env;
-    const anthropic = Boolean(env.ANTHROPIC_API_KEY && env.ANTHROPIC_MODEL);
-    const gemini = Boolean(env.GEMINI_API_KEY && env.GEMINI_MODEL);
+    const anthropic = Boolean(isUsableSecret(env.ANTHROPIC_API_KEY) && env.ANTHROPIC_MODEL);
+    const gemini = Boolean(isUsableSecret(env.GEMINI_API_KEY) && env.GEMINI_MODEL);
     const compatible = Boolean(env.OPENAI_COMPATIBLE_BASE_URL &&
-        env.OPENAI_COMPATIBLE_API_KEY &&
+        isUsableSecret(env.OPENAI_COMPATIBLE_API_KEY) &&
         env.OPENAI_COMPATIBLE_MODELS);
     return anthropic || gemini || compatible;
 }
 async function askSecret(label) {
-    if (!stdin.isTTY || !stdout.isTTY || typeof stdin.setRawMode !== "function") {
-        const rl = createInterface({ input: stdin, output: stdout });
-        const value = await rl.question(label);
-        rl.close();
-        return value.trim();
-    }
-    stdout.write(label);
-    stdin.setRawMode(true);
-    stdin.resume();
-    return await new Promise((resolveSecret, reject) => {
-        let value = "";
-        const finish = () => {
-            stdin.off("data", onData);
-            stdin.setRawMode(false);
-            stdin.pause();
+    for (;;) {
+        const hiddenOutput = new Writable({
+            write(_chunk, _encoding, callback) {
+                callback();
+            },
+        });
+        const hideInput = Boolean(stdin.isTTY && stdout.isTTY);
+        const rl = createInterface({
+            input: stdin,
+            output: hideInput ? hiddenOutput : stdout,
+            terminal: hideInput,
+        });
+        try {
+            stdout.write(label);
+            const value = await rl.question("");
             stdout.write("\n");
-            resolveSecret(value.trim());
-        };
-        const fail = () => {
-            stdin.off("data", onData);
-            stdin.setRawMode(false);
-            stdin.pause();
-            stdout.write("\n");
-            reject(new Error("Setup cancelled."));
-        };
-        const onData = (chunk) => {
-            for (const byte of chunk) {
-                if (byte === 3) {
-                    fail();
-                    return;
-                }
-                if (byte === 13 || byte === 10) {
-                    finish();
-                    return;
-                }
-                if (byte === 127 || byte === 8) {
-                    if (value.length > 0) {
-                        value = value.slice(0, -1);
-                        stdout.write("\b \b");
-                    }
-                    continue;
-                }
-                const character = Buffer.from([byte]).toString("utf8");
-                value += character;
-                stdout.write("*");
+            try {
+                return normalizeSecret(value);
             }
-        };
-        stdin.on("data", onData);
-    });
+            catch (error) {
+                console.log(error instanceof Error ? error.message : String(error));
+            }
+        }
+        finally {
+            rl.close();
+        }
+    }
 }
 async function promptRequired(question, defaultValue) {
     const rl = createInterface({ input: stdin, output: stdout });
@@ -280,8 +284,9 @@ async function setupReviewer(existing) {
         next.ANTHROPIC_MODEL = await promptRequired("Anthropic model ID");
     }
     else if (provider === "2") {
+        console.log("Paste is supported in this prompt, and the key remains hidden.");
         next.GEMINI_API_KEY = await askSecret("Gemini API key: ");
-        next.GEMINI_MODEL = await promptRequired("Gemini model ID");
+        next.GEMINI_MODEL = await promptRequired("Gemini model ID", existing.GEMINI_MODEL || "gemini-3.5-flash");
     }
     else if (provider === "3") {
         next.OPENAI_COMPATIBLE_BASE_URL = await promptRequired("OpenAI-compatible base URL", "https://openrouter.ai/api/v1");

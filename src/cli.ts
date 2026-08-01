@@ -9,6 +9,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { stdin, stdout } from "node:process";
 import { createInterface } from "node:readline/promises";
+import { Writable } from "node:stream";
 
 setDefaultResultOrder("ipv4first");
 
@@ -213,74 +214,78 @@ function ensureRuntimeDependencies(): void {
   }
 }
 
+function normalizeSecret(value: string): string {
+  let normalized = value.trim();
+  if (
+    (normalized.startsWith('"') && normalized.endsWith('"')) ||
+    (normalized.startsWith("'") && normalized.endsWith("'"))
+  ) {
+    normalized = normalized.slice(1, -1).trim();
+  }
+  if (normalized.length < 20) {
+    throw new Error("The API key is too short. Paste the complete key.");
+  }
+  if (/[^\x21-\x7E]/u.test(normalized)) {
+    throw new Error(
+      "The API key contains whitespace, a line break, or a non-ASCII character. Copy only the key value.",
+    );
+  }
+  return normalized;
+}
+
+function isUsableSecret(value: string | undefined): boolean {
+  if (!value) return false;
+  try {
+    normalizeSecret(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function hasConfiguredReviewer(): boolean {
   const env = process.env;
-  const anthropic = Boolean(env.ANTHROPIC_API_KEY && env.ANTHROPIC_MODEL);
-  const gemini = Boolean(env.GEMINI_API_KEY && env.GEMINI_MODEL);
+  const anthropic = Boolean(
+    isUsableSecret(env.ANTHROPIC_API_KEY) && env.ANTHROPIC_MODEL,
+  );
+  const gemini = Boolean(
+    isUsableSecret(env.GEMINI_API_KEY) && env.GEMINI_MODEL,
+  );
   const compatible = Boolean(
     env.OPENAI_COMPATIBLE_BASE_URL &&
-      env.OPENAI_COMPATIBLE_API_KEY &&
+      isUsableSecret(env.OPENAI_COMPATIBLE_API_KEY) &&
       env.OPENAI_COMPATIBLE_MODELS,
   );
   return anthropic || gemini || compatible;
 }
 
 async function askSecret(label: string): Promise<string> {
-  if (!stdin.isTTY || !stdout.isTTY || typeof stdin.setRawMode !== "function") {
-    const rl = createInterface({ input: stdin, output: stdout });
-    const value = await rl.question(label);
-    rl.close();
-    return value.trim();
-  }
+  for (;;) {
+    const hiddenOutput = new Writable({
+      write(_chunk, _encoding, callback) {
+        callback();
+      },
+    });
+    const hideInput = Boolean(stdin.isTTY && stdout.isTTY);
+    const rl = createInterface({
+      input: stdin,
+      output: hideInput ? hiddenOutput : stdout,
+      terminal: hideInput,
+    });
 
-  stdout.write(label);
-  stdin.setRawMode(true);
-  stdin.resume();
-
-  return await new Promise<string>((resolveSecret, reject) => {
-    let value = "";
-
-    const finish = (): void => {
-      stdin.off("data", onData);
-      stdin.setRawMode(false);
-      stdin.pause();
+    try {
+      stdout.write(label);
+      const value = await rl.question("");
       stdout.write("\n");
-      resolveSecret(value.trim());
-    };
-
-    const fail = (): void => {
-      stdin.off("data", onData);
-      stdin.setRawMode(false);
-      stdin.pause();
-      stdout.write("\n");
-      reject(new Error("Setup cancelled."));
-    };
-
-    const onData = (chunk: Buffer): void => {
-      for (const byte of chunk) {
-        if (byte === 3) {
-          fail();
-          return;
-        }
-        if (byte === 13 || byte === 10) {
-          finish();
-          return;
-        }
-        if (byte === 127 || byte === 8) {
-          if (value.length > 0) {
-            value = value.slice(0, -1);
-            stdout.write("\b \b");
-          }
-          continue;
-        }
-        const character = Buffer.from([byte]).toString("utf8");
-        value += character;
-        stdout.write("*");
+      try {
+        return normalizeSecret(value);
+      } catch (error) {
+        console.log(error instanceof Error ? error.message : String(error));
       }
-    };
-
-    stdin.on("data", onData);
-  });
+    } finally {
+      rl.close();
+    }
+  }
 }
 
 async function promptRequired(
@@ -320,8 +325,12 @@ async function setupReviewer(existing: SavedConfig): Promise<SavedConfig> {
     next.ANTHROPIC_API_KEY = await askSecret("Anthropic API key: ");
     next.ANTHROPIC_MODEL = await promptRequired("Anthropic model ID");
   } else if (provider === "2") {
+    console.log("Paste is supported in this prompt, and the key remains hidden.");
     next.GEMINI_API_KEY = await askSecret("Gemini API key: ");
-    next.GEMINI_MODEL = await promptRequired("Gemini model ID");
+    next.GEMINI_MODEL = await promptRequired(
+      "Gemini model ID",
+      existing.GEMINI_MODEL || "gemini-3.5-flash",
+    );
   } else if (provider === "3") {
     next.OPENAI_COMPATIBLE_BASE_URL = await promptRequired(
       "OpenAI-compatible base URL",

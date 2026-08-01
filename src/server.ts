@@ -70,7 +70,7 @@ type ReviewPayload = {
 };
 
 type BrowserEventRequest = {
-  event: "revision_submitted" | "final_answer" | "extension_error";
+  event: "extension_ready" | "revision_submitted" | "final_answer" | "extension_error";
   review_id?: string;
   content?: string;
   message?: string;
@@ -200,7 +200,7 @@ function parseBrowserEvent(value: unknown): BrowserEventRequest {
 
   const input = value as Record<string, unknown>;
   const event = typeof input.event === "string" ? input.event : "";
-  if (!new Set(["revision_submitted", "final_answer", "extension_error"]).has(event)) {
+  if (!new Set(["extension_ready", "revision_submitted", "final_answer", "extension_error"]).has(event)) {
     throw new Error("Unsupported browser event.");
   }
 
@@ -215,6 +215,12 @@ function parseBrowserEvent(value: unknown): BrowserEventRequest {
 }
 
 function logBrowserEvent(event: BrowserEventRequest): void {
+  if (event.event === "extension_ready") {
+    logHeader("BROWSER EXTENSION READY");
+    logSection("STATUS", event.message || event.content || "The extension is connected to the local server.");
+    return;
+  }
+
   if (event.event === "revision_submitted") {
     logHeader("BROWSER CONFIRMED: REVISION INSTRUCTION SUBMITTED TO CHATGPT", event.review_id);
     logSection(

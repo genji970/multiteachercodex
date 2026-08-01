@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 export type BrowserLaunchResult = {
   launched: boolean;
@@ -85,6 +85,49 @@ function resolveBrowserExecutable(): string | null {
   ]);
 }
 
+
+function stopBrowserUsingProfile(profileDir: string): void {
+  const marker = `--user-data-dir=${profileDir}`;
+
+  if (platform() === "win32") {
+    const script = [
+      "$marker = $env:MTC_PROFILE_MARKER",
+      "Get-CimInstance Win32_Process |",
+      "  Where-Object {",
+      "    ($_.Name -eq 'msedge.exe' -or $_.Name -eq 'chrome.exe') -and",
+      "    $_.CommandLine -and $_.CommandLine.Contains($marker)",
+      "  } |",
+      "  ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }",
+      "Start-Sleep -Milliseconds 350",
+    ].join("\n");
+    spawnSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], {
+      env: { ...process.env, MTC_PROFILE_MARKER: marker },
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    return;
+  }
+
+  const processList = spawnSync("ps", ["-axo", "pid=,command="], {
+    encoding: "utf8",
+  });
+  if (processList.status !== 0 || !processList.stdout) return;
+
+  for (const line of processList.stdout.split("\n")) {
+    if (!line.includes(marker)) continue;
+    if (!/(chrome|chromium|microsoft-edge)/iu.test(line)) continue;
+    const match = line.trim().match(/^(\d+)\s+/u);
+    if (!match?.[1]) continue;
+    const pid = Number(match[1]);
+    if (!Number.isSafeInteger(pid) || pid <= 0 || pid === process.pid) continue;
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {
+      // The process may have already exited.
+    }
+  }
+}
+
 function defaultProfileDir(): string {
   if (platform() === "win32") {
     const root = process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local");
@@ -119,12 +162,14 @@ export function launchChatGptBrowser(extensionDir: string): BrowserLaunchResult 
 
   const profileDir = process.env.MTC_BROWSER_PROFILE_DIR?.trim() || defaultProfileDir();
   const absoluteExtensionDir = resolve(extensionDir);
+  stopBrowserUsingProfile(profileDir);
   const args = [
     `--user-data-dir=${profileDir}`,
     `--disable-extensions-except=${absoluteExtensionDir}`,
     `--load-extension=${absoluteExtensionDir}`,
     "--no-first-run",
     "--no-default-browser-check",
+    "--new-window",
     "https://chatgpt.com/",
   ];
 
