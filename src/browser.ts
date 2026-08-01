@@ -1,0 +1,138 @@
+import { existsSync } from "node:fs";
+import { homedir, platform } from "node:os";
+import { delimiter, dirname, join, resolve } from "node:path";
+import { spawn } from "node:child_process";
+
+export type BrowserLaunchResult = {
+  launched: boolean;
+  executable?: string;
+  profileDir?: string;
+  reason?: string;
+};
+
+function pathCandidates(command: string): string[] {
+  const pathValue = process.env.PATH ?? "";
+  const extensions = platform() === "win32" ? [".exe", ".cmd", ".bat", ""] : [""];
+  const candidates: string[] = [];
+  for (const directory of pathValue.split(delimiter)) {
+    if (!directory) continue;
+    for (const extension of extensions) {
+      candidates.push(join(directory, `${command}${extension}`));
+    }
+  }
+  return candidates;
+}
+
+function firstExisting(candidates: Array<string | undefined>): string | null {
+  for (const candidate of candidates) {
+    if (candidate && existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+function resolveBrowserExecutable(): string | null {
+  if (process.env.MTC_BROWSER_EXECUTABLE?.trim()) {
+    const explicit = resolve(process.env.MTC_BROWSER_EXECUTABLE.trim());
+    return existsSync(explicit) ? explicit : null;
+  }
+
+  if (platform() === "win32") {
+    const programFilesX86 = process.env["ProgramFiles(x86)"];
+    const programFiles = process.env.ProgramFiles;
+    const localAppData = process.env.LOCALAPPDATA;
+    return firstExisting([
+      programFilesX86
+        ? join(programFilesX86, "Microsoft", "Edge", "Application", "msedge.exe")
+        : undefined,
+      programFiles
+        ? join(programFiles, "Microsoft", "Edge", "Application", "msedge.exe")
+        : undefined,
+      localAppData
+        ? join(localAppData, "Microsoft", "Edge", "Application", "msedge.exe")
+        : undefined,
+      programFilesX86
+        ? join(programFilesX86, "Google", "Chrome", "Application", "chrome.exe")
+        : undefined,
+      programFiles
+        ? join(programFiles, "Google", "Chrome", "Application", "chrome.exe")
+        : undefined,
+      localAppData
+        ? join(localAppData, "Google", "Chrome", "Application", "chrome.exe")
+        : undefined,
+      ...pathCandidates("msedge"),
+      ...pathCandidates("chrome"),
+    ]);
+  }
+
+  if (platform() === "darwin") {
+    return firstExisting([
+      "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+      "/Applications/Chromium.app/Contents/MacOS/Chromium",
+      ...pathCandidates("microsoft-edge"),
+      ...pathCandidates("google-chrome"),
+      ...pathCandidates("chromium"),
+    ]);
+  }
+
+  return firstExisting([
+    ...pathCandidates("microsoft-edge"),
+    ...pathCandidates("microsoft-edge-stable"),
+    ...pathCandidates("google-chrome"),
+    ...pathCandidates("google-chrome-stable"),
+    ...pathCandidates("chromium"),
+    ...pathCandidates("chromium-browser"),
+  ]);
+}
+
+function defaultProfileDir(): string {
+  if (platform() === "win32") {
+    const root = process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local");
+    return join(root, "MultiTeacherCodex", "browser-profile");
+  }
+  if (platform() === "darwin") {
+    return join(homedir(), "Library", "Application Support", "MultiTeacherCodex", "browser-profile");
+  }
+  const dataRoot = process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share");
+  return join(dataRoot, "multiteachercodex", "browser-profile");
+}
+
+export function launchChatGptBrowser(extensionDir: string): BrowserLaunchResult {
+  if (process.env.MTC_AUTO_OPEN_BROWSER !== "1") {
+    return { launched: false, reason: "automatic browser launch is disabled" };
+  }
+
+  if (platform() !== "win32" && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
+    return {
+      launched: false,
+      reason: "no graphical desktop was detected (DISPLAY/WAYLAND_DISPLAY is unset)",
+    };
+  }
+
+  const executable = resolveBrowserExecutable();
+  if (!executable) {
+    return {
+      launched: false,
+      reason: "Microsoft Edge, Google Chrome, or Chromium was not found",
+    };
+  }
+
+  const profileDir = process.env.MTC_BROWSER_PROFILE_DIR?.trim() || defaultProfileDir();
+  const absoluteExtensionDir = resolve(extensionDir);
+  const args = [
+    `--user-data-dir=${profileDir}`,
+    `--disable-extensions-except=${absoluteExtensionDir}`,
+    `--load-extension=${absoluteExtensionDir}`,
+    "--no-first-run",
+    "--no-default-browser-check",
+    "https://chatgpt.com/",
+  ];
+
+  const child = spawn(executable, args, {
+    detached: true,
+    stdio: "ignore",
+  });
+  child.unref();
+
+  return { launched: true, executable, profileDir };
+}
