@@ -1,5 +1,13 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+
+try {
+    [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+    $OutputEncoding = [Console]::OutputEncoding
+    chcp 65001 > $null
+} catch {
+    # Continue even when the host does not support changing the code page.
+}
 
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $AppDataRoot = Join-Path $env:LOCALAPPDATA "MultiTeacherCodex"
@@ -23,7 +31,7 @@ function Get-NodeMajorVersion {
 }
 
 function Install-PortableNode {
-    Write-Step "Node.js 22를 사용자 폴더에 자동 설치합니다. 관리자 권한은 필요하지 않습니다."
+    Write-Step "Installing portable Node.js 22 in your user profile (no admin rights required)."
 
     New-Item -ItemType Directory -Force -Path $AppDataRoot | Out-Null
     if (Test-Path $PortableNodeRoot) {
@@ -34,7 +42,7 @@ function Install-PortableNode {
     $checksums = (Invoke-WebRequest -UseBasicParsing -Uri "https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt").Content
     $match = [regex]::Match($checksums, "node-v\d+\.\d+\.\d+-win-x64\.zip")
     if (-not $match.Success) {
-        throw "최신 Node.js 22 Windows 패키지를 찾지 못했습니다."
+        throw "Could not locate the latest Node.js 22 Windows package."
     }
 
     $zipName = $match.Value
@@ -46,7 +54,7 @@ function Install-PortableNode {
     $nodeExe = Get-ChildItem -Path $PortableNodeRoot -Filter "node.exe" -Recurse |
         Select-Object -First 1 -ExpandProperty FullName
     if (-not $nodeExe) {
-        throw "설치된 Node.js 실행 파일을 찾지 못했습니다."
+        throw "The installed Node.js executable was not found."
     }
 
     return Split-Path -Parent $nodeExe
@@ -72,13 +80,13 @@ function Test-MultiTeacherServer {
 Set-Location $ProjectRoot
 
 if (-not (Test-Path ".\package.json")) {
-    throw "package.json이 없습니다. 저장소 루트에서 run.cmd를 실행하세요."
+    throw "package.json is missing. Run run.cmd from the repository root."
 }
 if (-not (Test-Path ".\extension\manifest.json")) {
-    throw "extension\manifest.json이 없습니다. git pull 후 다시 실행하세요."
+    throw "extension\manifest.json is missing. Update the repository and try again."
 }
 if (-not (Test-Path ".\dist\cli.js")) {
-    throw "dist\cli.js가 없습니다. 최신 저장소를 다시 받아주세요."
+    throw "dist\cli.js is missing. Update the repository and try again."
 }
 
 $NodeHome = Resolve-NodeHome
@@ -91,6 +99,11 @@ if (-not (Test-Path $NodeExe)) {
 }
 if (-not (Test-Path $NpmCmd)) {
     $NpmCmd = (Get-Command npm.cmd -ErrorAction Stop).Source
+}
+
+$existingNodeOptions = [string]$env:NODE_OPTIONS
+if ($existingNodeOptions -notmatch "--dns-result-order") {
+    $env:NODE_OPTIONS = ($existingNodeOptions + " --dns-result-order=ipv4first").Trim()
 }
 
 Write-Step "Node $(& $NodeExe --version), npm $(& $NpmCmd --version)"
@@ -109,10 +122,10 @@ foreach ($dependency in $runtimeDependencies) {
 }
 
 if (-not $dependenciesReady) {
-    Write-Step "필요한 npm 패키지를 자동 설치합니다."
+    Write-Step "Installing required npm packages."
     & $NpmCmd install --omit=dev --no-audit --no-fund --package-lock=false
     if ($LASTEXITCODE -ne 0) {
-        throw "npm install에 실패했습니다. 네트워크와 npm 설정을 확인하세요."
+        throw "npm install failed. Check your network and npm configuration."
     }
 }
 
@@ -120,13 +133,14 @@ $env:MTC_AUTO_OPEN_BROWSER = "1"
 $env:MTC_BROWSER_PROFILE_DIR = $BrowserProfileDir
 
 if (Test-MultiTeacherServer) {
-    Write-Step "이미 실행 중인 리뷰 서버를 재사용하고 ChatGPT Edge 창을 엽니다."
+    Write-Step "Reusing the running review server and opening ChatGPT."
     & $NodeExe ".\dist\open-browser.js"
     exit $LASTEXITCODE
 }
 
-Write-Step "서버를 시작합니다. 이 창에 질문, 초안, 외부 검토, 전달 지침, 최종 답변이 모두 출력됩니다."
-Write-Step "이 PowerShell 창은 ChatGPT를 사용하는 동안 닫지 마세요."
+Write-Step "Starting the review server."
+Write-Step "This terminal will print the question, draft, external review, revision instruction, and final answer."
+Write-Step "Keep this PowerShell window open while using ChatGPT."
 Write-Host ""
 
 & $NodeExe ".\dist\cli.js" @args

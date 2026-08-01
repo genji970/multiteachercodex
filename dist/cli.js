@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
+import { setDefaultResultOrder } from "node:dns";
 import { createRequire } from "node:module";
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -7,6 +8,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { stdin, stdout } from "node:process";
 import { createInterface } from "node:readline/promises";
+setDefaultResultOrder("ipv4first");
 const APP_NAME = "multiteachercodex";
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const requireFromCli = createRequire(import.meta.url);

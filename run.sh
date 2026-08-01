@@ -27,20 +27,20 @@ download() {
   elif command -v wget >/dev/null 2>&1; then
     wget -O "$output" "$url"
   else
-    printf 'curl 또는 wget이 필요합니다.\n' >&2
+    printf 'curl or wget is required.\n' >&2
     exit 1
   fi
 }
 
 install_portable_node() {
-  step "Node.js 22를 사용자 폴더에 자동 설치합니다. sudo는 필요하지 않습니다."
+  step "Installing portable Node.js 22 in your user profile (no sudo required)."
 
   machine=$(uname -m)
   case "$machine" in
     x86_64|amd64) node_arch=x64 ;;
     aarch64|arm64) node_arch=arm64 ;;
     *)
-      printf '지원하지 않는 CPU 아키텍처입니다: %s\n' "$machine" >&2
+      printf 'Unsupported CPU architecture: %s\n' "$machine" >&2
       exit 1
       ;;
   esac
@@ -55,7 +55,7 @@ install_portable_node() {
   rm -f "$sums_file"
 
   if [ -z "$archive" ]; then
-    printf '최신 Node.js 22 Linux 패키지를 찾지 못했습니다.\n' >&2
+    printf 'Could not locate the latest Node.js 22 Linux package.\n' >&2
     exit 1
   fi
 
@@ -69,9 +69,9 @@ install_portable_node() {
 
 cd "$PROJECT_ROOT"
 
-[ -f package.json ] || { printf 'package.json이 없습니다. 저장소 루트에서 실행하세요.\n' >&2; exit 1; }
-[ -f extension/manifest.json ] || { printf 'extension/manifest.json이 없습니다. git pull 후 다시 실행하세요.\n' >&2; exit 1; }
-[ -f dist/cli.js ] || { printf 'dist/cli.js가 없습니다. 최신 저장소를 다시 받아주세요.\n' >&2; exit 1; }
+[ -f package.json ] || { printf 'package.json is missing. Run run.sh from the repository root.\n' >&2; exit 1; }
+[ -f extension/manifest.json ] || { printf 'extension/manifest.json is missing. Update the repository and try again.\n' >&2; exit 1; }
+[ -f dist/cli.js ] || { printf 'dist/cli.js is missing. Update the repository and try again.\n' >&2; exit 1; }
 
 major=$(node_major)
 case "$major" in
@@ -90,12 +90,18 @@ export PATH
 NODE_BIN="$NODE_HOME/node"
 NPM_BIN="$NODE_HOME/npm"
 
+case " ${NODE_OPTIONS:-} " in
+  *" --dns-result-order="*) ;;
+  *) NODE_OPTIONS="${NODE_OPTIONS:-} --dns-result-order=ipv4first" ;;
+esac
+export NODE_OPTIONS
+
 step "Node $($NODE_BIN --version), npm $($NPM_BIN --version)"
 
 if [ ! -f node_modules/@modelcontextprotocol/sdk/package.json ] || \
    [ ! -f node_modules/dotenv/package.json ] || \
    [ ! -f node_modules/zod/package.json ]; then
-  step "필요한 npm 패키지를 자동 설치합니다."
+  step "Installing required npm packages."
   "$NPM_BIN" install --omit=dev --no-audit --no-fund --package-lock=false
 fi
 
@@ -103,11 +109,12 @@ export MTC_AUTO_OPEN_BROWSER=1
 export MTC_BROWSER_PROFILE_DIR="$BROWSER_PROFILE_DIR"
 
 if "$NODE_BIN" -e "fetch('$HEALTH_URL').then(r=>r.json()).then(v=>process.exit(v.status==='ok'?0:1)).catch(()=>process.exit(1))"; then
-  step "이미 실행 중인 리뷰 서버를 재사용하고 ChatGPT 브라우저 창을 엽니다."
+  step "Reusing the running review server and opening ChatGPT."
   exec "$NODE_BIN" ./dist/open-browser.js
 fi
 
-step "서버를 시작합니다. 이 터미널에 질문, 초안, 외부 검토, 전달 지침, 최종 답변이 모두 출력됩니다."
-step "이 터미널은 ChatGPT를 사용하는 동안 닫지 마세요."
+step "Starting the review server."
+step "This terminal will print the question, draft, external review, revision instruction, and final answer."
+step "Keep this terminal open while using ChatGPT."
 printf '\n'
 exec "$NODE_BIN" ./dist/cli.js "$@"

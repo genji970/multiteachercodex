@@ -12,18 +12,22 @@ User prompt
   → Revised ChatGPT answer shown to the user
 ```
 
-## Windows PowerShell: clone and run
+## Windows PowerShell: one-line install/update/run
+
+Run this from any PowerShell directory. It updates an existing checkout at `$HOME\multiteachercodex`, or clones it when missing, then starts everything:
 
 ```powershell
-git clone https://github.com/genji970/multiteachercodex.git
-cd multiteachercodex; .\run.cmd
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/genji970/multiteachercodex/main/install.ps1 | iex"
 ```
 
-Or run everything in one PowerShell line:
+Manual clone plus one command also works:
 
 ```powershell
-git clone https://github.com/genji970/multiteachercodex.git; cd multiteachercodex; .\run.cmd
+git clone https://github.com/genji970/multiteachercodex.git $HOME\multiteachercodex
+& $HOME\multiteachercodex\run.cmd
 ```
+
+Do not run `git clone ...` while already inside an older `multiteachercodex` directory, because that creates `multiteachercodex\multiteachercodex`. Use the installer above instead.
 
 The launcher automatically:
 
@@ -52,14 +56,25 @@ API keys are never printed.
 
 ### Later Windows runs
 
+Use the same installer command to update and run, or run:
+
 ```powershell
-cd $HOME\multiteachercodex; .\run.cmd
+& $HOME\multiteachercodex\run.cmd
 ```
 
-## Linux desktop: clone and run
+## Linux desktop: one-line install/update/run
+
+Run this from any directory:
 
 ```bash
-git clone https://github.com/genji970/multiteachercodex.git && cd multiteachercodex && sh ./run.sh
+curl -fsSL https://raw.githubusercontent.com/genji970/multiteachercodex/main/install.sh | sh
+```
+
+Manual clone plus one command also works:
+
+```bash
+git clone https://github.com/genji970/multiteachercodex.git "$HOME/multiteachercodex"
+sh "$HOME/multiteachercodex/run.sh"
 ```
 
 `run.sh` performs the same setup. If Node.js 20+ is unavailable, it installs portable Node.js 22 under the user's data directory without `sudo`. It supports x86-64 and ARM64 Linux.
@@ -74,8 +89,10 @@ On a headless Linux server, the review server still starts and prints logs, but 
 
 ### Later Linux runs
 
+Use the same installer command to update and run, or run:
+
 ```bash
-cd ~/multiteachercodex && sh ./run.sh
+sh "$HOME/multiteachercodex/run.sh"
 ```
 
 ## First run
