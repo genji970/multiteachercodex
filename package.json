@@ -1,0 +1,60 @@
+{
+  "name": "multiteachercodex",
+  "version": "0.5.0",
+  "type": "module",
+  "description": "Automatically review ChatGPT drafts with independent frontier models and show only the revised final answer.",
+  "license": "MIT",
+  "bin": {
+    "multiteachercodex": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "extension",
+    ".env.example",
+    "README.md",
+    "LICENSE",
+    "run.cmd",
+    "run.ps1",
+    "run.sh"
+  ],
+  "scripts": {
+    "dev": "tsx src/cli.ts",
+    "start": "node dist/cli.js",
+    "build": "npm run build:server && npm run build:extension",
+    "check": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p extension/tsconfig.json && node --import tsx --test tests/*.test.ts",
+    "prepack": "npm run build",
+    "tunnel": "npx -y ngrok http 8787",
+    "build:server": "tsc -p tsconfig.json",
+    "build:extension": "tsc -p extension/tsconfig.json"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "chatgpt",
+    "mcp",
+    "multi-teacher",
+    "frontier-model",
+    "reviewer",
+    "cross-check",
+    "typescript"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/genji970/multiteachercodex.git"
+  },
+  "bugs": {
+    "url": "https://github.com/genji970/multiteachercodex/issues"
+  },
+  "homepage": "https://github.com/genji970/multiteachercodex#readme",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.20.2",
+    "dotenv": "^16.6.1",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.30",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3"
+  }
+}
