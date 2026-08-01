@@ -3,7 +3,7 @@
 MultiTeacherCodex automatically reviews ChatGPT's first draft with an independent frontier model and sends the critique back to ChatGPT for revision.
 
 ###Demo###
-<img width="973" height="510" alt="Image" src="https://github.com/user-attachments/assets/f81db060-3b5a-4a04-bcca-226753819133" />
+<img width="973" height="510" alt="Image" src="https://github.com/user-attachments/assets/bc0f35f3-1b40-4ee4-b735-dcb8231940bd" />
 
 ###Run###
 ```python
