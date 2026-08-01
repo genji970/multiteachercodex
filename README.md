@@ -2,6 +2,13 @@
 
 MultiTeacherCodex automatically reviews ChatGPT's first draft with an independent frontier model and sends the critique back to ChatGPT for revision.
 
+##Run##
+```python
+git clone https://github.com/genji970/multiteachercodex.git
+cd multiteachercodex
+.\run.cmd
+```
+
 The user submits **one prompt only**:
 
 ```text
