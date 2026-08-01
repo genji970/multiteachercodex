@@ -1,17 +1,23 @@
+import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
+import { launchChatGptBrowser } from "./browser.js";
 import { config, loadReviewers } from "./config.js";
 import { buildReviewPrompt, buildRevisionInstruction } from "./prompt.js";
 import { formatReviewsForRevision, runReviews } from "./review.js";
 const MCP_PATH = "/mcp";
 const REVIEW_PATH = "/review";
+const EVENT_PATH = "/event";
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
-const EXTENSION_PATH = resolve(dirname(fileURLToPath(import.meta.url)), "..", "extension");
+const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const EXTENSION_PATH = resolve(PROJECT_ROOT, "extension");
+const LOG_WIDTH = 100;
 const reviewOutputSchema = {
+    review_id: z.string(),
     successful_reviewers: z.number(),
     failed_reviewers: z.number(),
     issue_count: z.number(),
@@ -40,6 +46,52 @@ const reviewOutputSchema = {
     })),
     revision_instruction: z.string(),
 };
+function timestamp() {
+    return new Date().toISOString();
+}
+function line(character = "=") {
+    return character.repeat(LOG_WIDTH);
+}
+function logHeader(title, reviewId) {
+    console.log(`\n${line()}`);
+    console.log(`[${timestamp()}] ${title}${reviewId ? ` | review_id=${reviewId}` : ""}`);
+    console.log(line());
+}
+function logSection(title, content) {
+    console.log(`\n--- ${title} ${"-".repeat(Math.max(1, LOG_WIDTH - title.length - 5))}`);
+    console.log(content || "(empty)");
+}
+function formatReviewerResult(result, index) {
+    const lines = [
+        `Reviewer ${index + 1}`,
+        `id: ${result.reviewer}`,
+        `provider: ${result.provider}`,
+        `model: ${result.model}`,
+        `status: ${result.ok ? "ok" : "failed"}`,
+        `latency_ms: ${result.latency_ms}`,
+    ];
+    if (!result.ok) {
+        lines.push(`error: ${result.error ?? "unknown error"}`);
+        return lines.join("\n");
+    }
+    if (result.review) {
+        lines.push(`summary: ${result.review.summary || "(none)"}`);
+        lines.push(`confidence: ${result.review.confidence ?? "(not supplied)"}`);
+        lines.push(`issues: ${result.review.issues.length}`);
+        for (const [issueIndex, issue] of result.review.issues.entries()) {
+            lines.push("");
+            lines.push(`  Issue ${issueIndex + 1} [${issue.severity}/${issue.category}]`);
+            lines.push(`  excerpt: ${issue.excerpt || "(not specified)"}`);
+            lines.push(`  problem: ${issue.problem}`);
+            lines.push(`  correction: ${issue.correction}`);
+            lines.push(`  required_content: ${issue.required_content.length ? issue.required_content.join(" | ") : "(none)"}`);
+        }
+    }
+    lines.push("");
+    lines.push("raw reviewer output:");
+    lines.push(result.raw_text || "(empty)");
+    return lines.join("\n");
+}
 function setCors(res) {
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
@@ -90,11 +142,50 @@ function parseReviewRequest(value) {
         ...(focus ? { focus } : {}),
     };
 }
-async function createReviewPayload(input) {
+function parseBrowserEvent(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+        throw new Error("Expected a JSON object.");
+    }
+    const input = value;
+    const event = typeof input.event === "string" ? input.event : "";
+    if (!new Set(["revision_submitted", "final_answer", "extension_error"]).has(event)) {
+        throw new Error("Unsupported browser event.");
+    }
+    return {
+        event: event,
+        ...(typeof input.review_id === "string" && input.review_id.trim()
+            ? { review_id: input.review_id.trim() }
+            : {}),
+        ...(typeof input.content === "string" ? { content: input.content } : {}),
+        ...(typeof input.message === "string" ? { message: input.message } : {}),
+    };
+}
+function logBrowserEvent(event) {
+    if (event.event === "revision_submitted") {
+        logHeader("BROWSER CONFIRMED: REVISION INSTRUCTION SUBMITTED TO CHATGPT", event.review_id);
+        logSection("DELIVERED REVISION INSTRUCTION", event.content || "The extension confirmed submission, but no instruction text was supplied.");
+        return;
+    }
+    if (event.event === "final_answer") {
+        logHeader("FINAL CHATGPT ANSWER COMPLETED", event.review_id);
+        logSection("FINAL ANSWER", event.content || "(empty)");
+        console.log(`\n${line()}\n`);
+        return;
+    }
+    logHeader("BROWSER EXTENSION ERROR", event.review_id);
+    logSection("ERROR", event.message || event.content || "Unknown extension error.");
+}
+async function createReviewPayload(input, reviewId = randomUUID()) {
     const reviewers = loadReviewers();
     if (reviewers.length === 0) {
         throw new Error("No external reviewer is configured. Run npx -y . --setup and configure at least one provider.");
     }
+    logHeader("CHATGPT DRAFT CAPTURED — EXTERNAL REVIEW STARTING", reviewId);
+    logSection("ORIGINAL USER QUESTION", input.original_question);
+    logSection("CHATGPT FIRST DRAFT", input.chatgpt_answer);
+    if (input.focus)
+        logSection("ADDITIONAL REVIEW FOCUS", input.focus);
+    logSection("REVIEWERS", reviewers.map((reviewer) => `${reviewer.provider}:${reviewer.model}`).join("\n"));
     const reviewPrompt = buildReviewPrompt({
         originalQuestion: input.original_question,
         chatgptAnswer: input.chatgpt_answer,
@@ -102,6 +193,10 @@ async function createReviewPayload(input) {
     });
     const results = await runReviews(reviewers, reviewPrompt, config.timeoutMs);
     const successful = results.filter((result) => result.ok);
+    logHeader("EXTERNAL REVIEW RESULTS", reviewId);
+    for (const [index, result] of results.entries()) {
+        logSection(`REVIEWER ${index + 1} RESULT`, formatReviewerResult(result, index));
+    }
     if (successful.length === 0) {
         const errors = results
             .map((result) => `${result.reviewer}: ${result.error ?? "unknown error"}`)
@@ -111,7 +206,11 @@ async function createReviewPayload(input) {
     const formattedReviews = formatReviewsForRevision(results);
     const revisionInstruction = buildRevisionInstruction(input.original_question, input.chatgpt_answer, formattedReviews);
     const issueCount = successful.reduce((sum, result) => sum + (result.review?.issues.length ?? 0), 0);
+    logHeader("REVISION INSTRUCTION CREATED", reviewId);
+    logSection("EXACT TEXT TO BE SENT BACK TO CHATGPT", revisionInstruction);
+    logSection("REVIEW SUMMARY", `successful_reviewers: ${successful.length}\nfailed_reviewers: ${results.length - successful.length}\nissue_count: ${issueCount}`);
     return {
+        review_id: reviewId,
         successful_reviewers: successful.length,
         failed_reviewers: results.length - successful.length,
         issue_count: issueCount,
@@ -122,7 +221,7 @@ async function createReviewPayload(input) {
 function createReviewerServer() {
     const server = new McpServer({
         name: "multiteachercodex",
-        version: "0.4.0",
+        version: "0.5.0",
     }, {
         instructions: "For every substantive user request while this app is selected, do not immediately show a final answer. First create a complete candidate answer internally, call review_chatgpt_answer exactly once with the user's exact request and that complete candidate answer, evaluate the returned independent critique, and then provide only the revised final answer. Never expose the candidate draft, tool workflow, reviewer names, or revision prompt unless the user explicitly asks about the review process.",
     });
@@ -168,6 +267,7 @@ function createReviewerServer() {
             };
         }
         catch (error) {
+            console.error(`[${timestamp()}] MCP review failed: ${error instanceof Error ? error.message : String(error)}`);
             return {
                 isError: true,
                 content: [
@@ -202,16 +302,35 @@ const httpServer = createServer(async (req, res) => {
             status: "ok",
             mode: "browser-extension-and-mcp",
             review: REVIEW_PATH,
+            event: EVENT_PATH,
             mcp: MCP_PATH,
             reviewers,
         });
         return;
     }
     if (req.method === "POST" && url.pathname === REVIEW_PATH) {
+        const reviewId = randomUUID();
         try {
             const input = parseReviewRequest(await readJsonBody(req));
-            const payload = await createReviewPayload(input);
+            const payload = await createReviewPayload(input, reviewId);
             writeJson(res, 200, { ok: true, ...payload });
+        }
+        catch (error) {
+            logHeader("REVIEW FAILED", reviewId);
+            logSection("ERROR", error instanceof Error ? error.message : String(error));
+            writeJson(res, 400, {
+                ok: false,
+                review_id: reviewId,
+                error: error instanceof Error ? error.message : String(error),
+            });
+        }
+        return;
+    }
+    if (req.method === "POST" && url.pathname === EVENT_PATH) {
+        try {
+            const event = parseBrowserEvent(await readJsonBody(req));
+            logBrowserEvent(event);
+            writeJson(res, 200, { ok: true });
         }
         catch (error) {
             writeJson(res, 400, {
@@ -251,10 +370,22 @@ const httpServer = createServer(async (req, res) => {
 httpServer.listen(config.port, "127.0.0.1", () => {
     const reviewers = loadReviewers();
     console.log(`MultiTeacherCodex local review API: http://127.0.0.1:${config.port}${REVIEW_PATH}`);
+    console.log(`Browser event API: http://127.0.0.1:${config.port}${EVENT_PATH}`);
     console.log(`Optional MCP endpoint: http://127.0.0.1:${config.port}${MCP_PATH}`);
     console.log(`Browser extension folder: ${EXTENSION_PATH}`);
     console.log(reviewers.length
         ? `Configured reviewers: ${reviewers.map((r) => `${r.provider}:${r.model}`).join(", ")}`
         : "No reviewer configured yet. Run npx -y . --setup.");
+    console.log("Terminal logging is enabled. Questions, drafts, reviews, revision instructions, and final answers will appear here.");
+    const browser = launchChatGptBrowser(EXTENSION_PATH);
+    if (browser.launched) {
+        console.log(`[MultiTeacherCodex] Opened ChatGPT with the extension loaded.`);
+        console.log(`[MultiTeacherCodex] Browser: ${browser.executable}`);
+        console.log(`[MultiTeacherCodex] Profile: ${browser.profileDir}`);
+    }
+    else if (process.env.MTC_AUTO_OPEN_BROWSER === "1") {
+        console.warn(`[MultiTeacherCodex] Could not open ChatGPT automatically: ${browser.reason}`);
+        console.warn("Open a Chromium-based browser with the extension loaded, then visit https://chatgpt.com/.");
+    }
 });
 //# sourceMappingURL=server.js.map
